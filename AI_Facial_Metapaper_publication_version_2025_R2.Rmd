@@ -1,0 +1,469 @@
+---
+title: "AI_In_ASD_Diagnosis_SocialTasks_Meta"
+author: "Carter Sun"
+date: "2025-06-13"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+graphics.off()
+knitr::opts_chunk$set(echo = TRUE,message=FALSE,warning=FALSE)
+```
+# - - - - - - - - - - - - - - -
+
+# - PREPARE WORKSPACE ---
+
+# - - - - - - - - - - - - - - -
+
+```{r preparation}
+library(rmarkdown)
+library(knitr)
+library(lubridate)
+library(dplyr)
+
+requiredlibraries <- c("dplyr","mada","mvtnorm","ellipse","mvmeta","meta","metafor","rmeta","readxl","ggplot2","ggpubr", "forestplot","robumeta","gridExtra","gridGraphics","forcats","devtools", "stringr")
+
+# loop over required libraries and install if not present, dependencies might have to be installed manually
+for (i in requiredlibraries) {
+  if (!(i %in% rownames(installed.packages()))) install.packages(i, dependencies = TRUE)
+}
+# loop over required libraries to load
+for (i in requiredlibraries) {
+  current_lib <- i
+  if (!i=="meta"){
+    library(current_lib, character.only=TRUE)}
+}
+library(meta)
+
+## Navigate to coding/results folder paths
+usr_dir <-normalizePath(Sys.getenv("USERPROFILE"), winslash = "/", mustWork = FALSE)
+data_folder <- file.path(usr_dir,"/Path_to_DataSet/")
+results_folder <- file.path(usr_dir,"/Path_to_results_folder")
+```
+
+# - - - - - - - - - - - - - - -
+# - Load Excel Files ---
+# - - - - - - - - - - - - - - -
+
+```{r }
+setwd(data_folder)
+original_data <- read_excel("Data_Extraction.xlsx","Data Extraction_Cleaned")
+
+cleaned_data <- read_excel("Data_Extraction.xlsx","2_by_2_table_final")
+bargraph_data <- read_excel("Data_Extraction.xlsx","all_study_table")
+scatterplot_data <- read_excel("Data_Extraction.xlsx","best_results")
+
+View(cleaned_data)
+# View(bargraph_data)
+# View(scatterplot_data)
+
+```
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# - Descriptive statistics for meta-analysis of diagnostic accuracy -
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+```{r}
+## ASD vs TD
+confusion_matrix_data <- (cleaned_data[,c("Group","Study","Autism_Group_Sample_Size","Control_Group_Sample_Size","Interaction Type","Interaction_type_class","Experimental Task","Experimental_Task_Number","Type of Experiment",                                         "Positive_Output_Class","Negative_Output_Class","Classifier","Modality","TP","FP","TN","FN","Sensitivity_Recall","Specificity","Accuracy","Precision","AUC","F1")])
+confusion_matrix_data_asd_original <-confusion_matrix_data %>% filter(confusion_matrix_data$`Positive_Output_Class` == "ASD" & confusion_matrix_data$`Negative_Output_Class` =="TD")
+# View(confusion_matrix_data_asd_original)
+
+## Only ASD/TD studies with TP/TN/FP/FN are included
+confusion_matrix_data_asd_cleaned <-confusion_matrix_data_asd_original[complete.cases(confusion_matrix_data_asd_original[ , "TP"]),]
+View(confusion_matrix_data_asd_cleaned)
+# View(confusion_matrix_data_asd_cleaned_sens_spec_dataincluded_truthtablemissing)
+
+## convert string to numeric
+i<-c(1,3:4,6,8,14:23)
+confusion_matrix_data_asd_cleaned[,i] <- apply(confusion_matrix_data_asd_cleaned[,i],2,function(x) as.numeric(as.character(x)))
+View(confusion_matrix_data_asd_cleaned)
+# write.xlsx2(confusion_matrix_data_asd_cleaned, file="confusion_matrix_data_asd_cleaned.xlsx", sheetName = "meta_table",
+  # col.names = TRUE, row.names = TRUE)
+
+## Only select One Best Result per research group
+bestoutcome_per_studygroup<-confusion_matrix_data_asd_cleaned %>% group_by(`Group`) %>%filter(rank(desc(Accuracy), ties.method = "first") == 1)%>% ungroup()
+View(bestoutcome_per_studygroup)
+```
+
+# - - - - - - - - - - -
+# - Calculate Effect Size and Variance
+# - - - - - - - - - - -
+
+```{r}
+# Based on the "Group" variable, create one that summaries study names which belongs to one group.
+group_authors <- confusion_matrix_data_asd_cleaned %>%
+  group_by(Group) %>%
+  summarise(
+    Group_Authors = paste(sort(unique(Study)), collapse = "; "),
+    .groups = "drop"
+  )
+confusion_matrix_data_asd_cleaned <- left_join(confusion_matrix_data_asd_cleaned, group_authors, by = "Group")
+
+# calculate effect size and variance from raw data
+metafor_log_or<-escalc(measure = "OR",ai=TP,n1i=Autism_Group_Sample_Size,ci=Control_Group_Sample_Size-TN,n2i=Control_Group_Sample_Size,data=confusion_matrix_data_asd_cleaned,add=1/2, to="all")
+# create a variable indicating each row is a unique outcome
+metafor_log_or <- metafor_log_or %>%
+  mutate(Outcome_ID = paste0("Outcome_", row_number()))
+View(metafor_log_or)
+
+
+# aggregate effect size based on study group
+metafor_log_or_aggregated <- aggregate(metafor_log_or,cluster = Group,rho = 0.6)
+label_map <- confusion_matrix_data_asd_cleaned %>%
+  group_by(Group) %>%
+  summarise(
+    Papers = paste(unique(Study), collapse = "; "),
+    Features = paste(
+      sort(unique(tolower(
+            trimws(
+              unlist(
+                strsplit(paste(Modality, collapse = "+"), "\\+")))))),
+      collapse = " + "
+    ),
+    Classifiers = paste(sort(unique(Classifier)), collapse = " + "),
+    Tasks = paste(sort(unique(str_to_title(`Experimental Task`))), collapse = " + "),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Combined_labels = paste0(
+      "[", Papers, "]: ","Features[", Features,"], Classifiers[", Classifiers, "], Tasks[", Tasks,"]"
+    )
+  )
+metafor_log_or_aggregated <- left_join(metafor_log_or_aggregated, label_map, by = "Group")
+
+View(metafor_log_or_aggregated)
+
+summary_metafor_OR_aggregated <- summary(metafor_log_or_aggregated, transf = exp, digits = 2)
+View(summary_metafor_OR_aggregated)
+```
+# ------------------
+## - Uni-variant meta-analysis on the best results only
+## - Due to repeated measures (AI/facial features) on the same population, Uni-variant analysis does not account for correlations here. Pick the best results would be give some indications of how well AI perform diagnosis.
+# ------------------
+
+```{r}
+setwd(results_folder)
+tiff(file="Figure3.tiff",res=600,width=17000,height=2500)
+
+### Sensitivity
+sensitivity_logit_InteractionType <- metaprop(TP,TP+FN,comb.fixed=FALSE,comb.random=TRUE,method="Inverse", sm="PLOGIT",method.ci="CP",method.tau = "DL",studlab=Study,byvar=`Interaction Type`,data=bestoutcome_per_studygroup )
+
+print(sensitivity_logit_InteractionType,digits=3)
+
+###Specificity (per study per experimental task)
+specificity_logit_InteractionType <- metaprop(TN,TN+FP,comb.fixed=FALSE,comb.random=TRUE,sm="PLOGIT",method="Inverse",method.ci="CP",method.tau = "DL", studlab=Study,byvar=`Interaction Type`,data=bestoutcome_per_studygroup)
+
+print(specificity_logit_InteractionType,digits=3)
+
+##plotting forest plots
+
+plot.sens<-grid.grabExpr(
+  forest(sensitivity_logit_InteractionType,
+            digits=3,
+            leftlabs = c("Study","TP","Total Autism Samples"),
+            overall.hetstat = FALSE,
+            prediction=TRUE,
+            col.subgroup = "black",
+            font = 10,
+            fontfamily = "Times",
+            rightcols = c("effect", "ci","w.random","Modality","Classifier","Experimental Task"),
+            rightlabs = c("Proportion", "95%-CI","Weight","Modality","Classifier","Experimental Task"),
+            xlab="Sensitivity"),height=1,width=2)
+
+plot.specificity<-grid.grabExpr(
+  forest(specificity_logit_InteractionType,
+            digits=3,
+            overall.hetstat = FALSE,
+            prediction = TRUE,
+            col.subgroup = "black",
+            font = 10,
+            fontfamily = "Times",
+            leftlabs = c("Study","TN","Total Control Samples"),
+            xlab="Specificity"),height=1,width=2)
+
+grid.arrange(plot.sens,plot.specificity,ncol=2,vp=viewport(width=0.77,height=0,clip=TRUE))
+
+dev.off()
+
+##Diagnostic odds ratio (per study group)
+
+DOR_InteractionType<-metabin(TP,TP+FP,FN,FN+TN,sm="DOR",comb.fixed = FALSE,comb.random = TRUE,method="Inverse",Study,byvar=`Interaction Type`,data=bestoutcome_per_studygroup)
+print(DOR_InteractionType)
+tiff(file="SupplementaryFigure2.tiff",width=11000,height=7000,res=600)
+meta::forest(DOR_InteractionType,
+            # sortvar = TE,
+            digits=3,
+            colgap = "5mm",
+            overall.hetstat = FALSE,
+            prediction = TRUE,
+            col.subgroup = "black",
+            font = 10,
+            fontfamily = "Times",
+            leftlabs = c("Study","TP","Predicted Positives","FN","Predicted Negatives"),
+            rightcols = c("effect", "ci","w.random","Modality","Classifier","Experimental Task"),
+            rightlabs = c("Proportion", "95%-CI","Weight","Modality","Classifier","Experimental Task"),
+            xlab="Diagnostic Odds Ratio")
+
+dev.off()
+```
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# - Bivariant Meta-Analysis on Aggregated Data -
+# - Account for correlations between Sensitivity and Specificity -
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+```{r}
+#fit model
+setwd(results_folder)
+
+tiff(file="Figure4.tiff",width=8000, height=3000,res=600)
+
+fit_bivariate <- reitsma(metafor_log_or_aggregated,correction.control="single")
+summary(fit_bivariate)
+windowsFonts(A = windowsFont("Times New Roman")) 
+plot(fit_bivariate, sroclwd=2, xlim=c(0,1), ylim=c(0,1),family="A", main="SROC curve (bivariate model) for Diagnostic Test Accuracy")
+metafor_log_or_aggregated$FPR <- fpr(metafor_log_or_aggregated)
+Study_1 <-metafor_log_or_aggregated[metafor_log_or_aggregated$Group_Authors=="C. Tang et al., 2020; N. Qiu et al., 2020",]
+Study_2 <-metafor_log_or_aggregated[metafor_log_or_aggregated$Group_Authors=="H. Drimalla et al., 2019; H. Drimalla et al., 2020",]
+Study_3 <-metafor_log_or_aggregated[metafor_log_or_aggregated$Group_Authors=="D. Alie et al., 2011",]
+Study_4 <-metafor_log_or_aggregated[metafor_log_or_aggregated$Group_Authors=="Z. Zhao et al., 2021",]
+Study_5 <-metafor_log_or_aggregated[metafor_log_or_aggregated$Group_Authors=="N. Kojovic et al., 2021",]
+
+#stillface
+points(Study_1$FPR,Study_1$Sensitivity_Recall, pch=20,col= "darkorange")
+#Simulated Interaction Task
+points(Study_2$FPR,Study_2$Sensitivity_Recall, pch=15,col= "black")
+#Parents and Children Interaction
+points(Study_3$FPR,Study_3$Sensitivity_Recall, pch=18,col= "darkgreen")
+# #Conversation
+points(Study_4$FPR,Study_4$Sensitivity_Recall, pch=10,col= "brown")
+# #ADOS Assessment
+points(Study_5$FPR,Study_5$Sensitivity_Recall, pch=17,col= "blue")
+
+abline(coef = c(0,1),lwd=3, lty=2)
+
+legend("bottomright", c("Still-Face", "Simulated Interaction Task","Parents and Children Interaction","Conversation","ADOS Assessment","summary estimate", "AUC = 0.862","Sensitivity = 0.769 [95%CI: 0.639, 0.862]", "Specificity = 0.817 [95%CI: 0.729, 0.881]"), pch = c(20,15,18,10,17,1, 1000,1000,1000))
+legend("bottomleft", c("SROC", "95% CI region"), lwd = c(2,1))
+dev.off()
+```
+### publication bias (USE THE ARGGREGATED DATA)
+```{r}
+setwd(results_folder)
+
+
+tiff(file="SupplementaryFigure3A_PublicationBias_aggregateddata.tiff",width=5000,height=5000,res=600)
+res_agg <- rma(yi, vi, data = metafor_log_or_aggregated)
+summary(res_agg)
+
+log_DOR_res_agg <- predict(res_agg, digits=3)
+## Check the predicted values in raw value format
+DOR_predictedres_agg<-predict(res_agg, transf=exp, digits=3)
+print(DOR_predictedres_agg,digits=3)
+
+funnel( metafor_log_or_aggregated$yi,vi = metafor_log_or_aggregated$vi , level=c(90, 95, 99), shade=c("white", "gray55", "gray75"), refline=0, legend=TRUE, atransf=exp, at=log(c(0.01,0.1,1,10,100)))
+# Modify font and font size
+par(family = "Times New Roman", cex = 1.0)
+
+dev.off()
+
+## Egger's test (k = 5 < 10, underpowered, so publication bias tests were not conducted)
+# metabias(metafor_log_or_aggregated$yi,metafor_log_or_aggregated$vi)
+
+## trim and fill
+# with(metafor_log_or,funnel(trimfill(yi,vi),legend=TRUE,atransfer=exp))
+tandf_res_agg <-trimfill(res_agg)
+summary(tandf_res_agg)
+DOR_predicted_tandf_res_agg<-predict(tandf_res_agg, transf=exp, digits=2)
+print(DOR_predicted_tandf_res_agg,digits=3)
+tiff(file="SupplementaryFigure3B_trimandfill.tiff",width=5000,height=5000,res=600)
+
+funnel(tandf_res_agg, shade=c("white", "gray55", "gray75"), atransf = exp)
+par(family = "Times New Roman", cex = 1.0)
+dev.off()
+
+
+```
+
+# - - - - - - - - - - - - - - -
+# - Three-level Meta-Analysis
+# - - - - - - - - - - - - - - -
+```{r}
+setwd(results_folder)
+
+metafor_random_effects_group <- rma.mv(yi, vi, random = ~ 1| `Group`/`Outcome_ID`,data=metafor_log_or,slab=`Study`)
+summary(metafor_random_effects_group)
+
+log_DOR_predicted_group <- predict(metafor_random_effects_group, digits=2)
+## Check the predicted values in raw value format
+DOR_predicted_group <-predict(metafor_random_effects_group, transf=exp, digits=2)
+print(DOR_predicted_group,digits=3)
+# To run the following var.comp function, one need to run the below code in Console [https://raw.githubusercontent.com/MathiasHarrer/dmetar/master/R/mlm.variance.distribution.R]
+
+I_sqr <-var.comp(metafor_random_effects_group)
+print(I_sqr)
+tiff(file="Supplementary_Figure4.tiff",width=9000,height=5500,res=600)
+# The three-level meta-analysis results from "metafor_random_effects_group" will be plotted and ordered by "Experimental Task"
+metafor::forest(metafor_random_effects_group, xlim=c(-4000,4000),
+               ylim=c(-2,44),at=(c(0,0.1,1,10,100,1000)),pred=log_DOR_predicted_group,transf=exp,header=TRUE,rows=c(1,4:5,8:15,18:37,40),
+             showweights=TRUE,order=metafor_log_or$Experimental.Task,
+             ilab=cbind(metafor_log_or$TP,metafor_log_or$Autism_Group_Sample_Size,metafor_log_or$TN,metafor_log_or$Control_Group_Sample_Size,metafor_log_or$Classifier,metafor_log_or$Modality),
+             ilab.xpos=c(-2500,-2000,-1500,-1000,1600,2500),cex=.75,
+             slab=metafor_log_or$`Study`)
+op <- par(cex=.75, font=2)
+text(c(-2500,-2000,-1500,-1000,1600,2500,3000), 43, c("TP", "Total +", "TN", "Total -","Classifier","Modality","Weight"))
+text(c(-2250,-1250),44, c("Autism", "Control"))
+text(-4000, c(41,38,16,6,2), c("Structured Face-to-Face Conversation","Still-Face Paradigm","Simulated Interaction Task","Parents and Child Interaction","ADOS-2 Assessment"), pos=4)
+
+# ### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-3000, -1, pos=4, bquote(paste("(Q = ",
+     .(formatC(metafor_random_effects_group$QE, digits=2, format="f")), ", df = ", .(metafor_random_effects_group$k - metafor_random_effects_group$p),
+     ", p <0.0001)")))
+par(op)
+dev.off()
+```
+# - - - - - - - - - - -  
+# - moderator analysis
+# - - - - - - - - - - -
+```{r}
+setwd(results_folder)
+
+## Subgroup: classification algorithm
+metafor_random_effects_model_mods_classification_algorithm <- rma.mv(yi, vi, mods = ~factor(`Classifier`), random = ~ 1| `Group`/`Outcome_ID`,data=metafor_log_or,slab=`Study`)
+metafor_random_effects_model_mods_classification_algorithm_eachgroup <- rma.mv(yi, vi, mods = ~factor(`Classifier`)-1,random = ~ 1| `Group`/`Outcome_ID`,data=metafor_log_or,slab=`Study`)
+
+# print(metafor_random_effects_model_mods_classification_algorithm, digits=3)
+
+Log_DOR_predicted_mods_classification_algorithm <- predict(metafor_random_effects_model_mods_classification_algorithm_eachgroup, digits=2)
+# print(Log_DOR_predicted_mods_classification_algorithm)
+DOR_predicted_mods_classification_algorithm<-predict(metafor_random_effects_model_mods_classification_algorithm_eachgroup, transf=exp, digits=2)
+# print(DOR_predicted_mods_classification_algorithm)
+
+
+## Subgroup: Modality
+metafor_random_effects_model_mods_Modality<- rma.mv(yi, vi, mods = ~factor(`Modality`), random = ~ 1| `Group`/`Outcome_ID`,data=metafor_log_or,slab=`Study`)
+
+metafor_random_effects_model_mods_Modality_eachgroup<- rma.mv(yi, vi, mods = ~factor(`Modality`)-1, random = ~ 1| `Group`/`Outcome_ID`,data=metafor_log_or,slab=`Study`)
+# print(metafor_random_effects_model_mods_Modality, digits=3)
+DOR_predicted_mods_Modality<-predict(metafor_random_effects_model_mods_Modality_eachgroup, transf=exp, digits=2)
+# print(DOR_predicted_mods_Modality)
+
+## Subgroup:Classification Algorithm  and Modality
+metafor_random_effects_model_mods_Modality_Classification_Algorithm<- rma.mv(yi, vi, mods = ~`Modality`+`Classifier`, random = ~ 1| `Group`/`Outcome_ID`,data=metafor_log_or,slab=`Study`)
+
+metafor_random_effects_model_mods_Modality_Classification_Algorithm_eachgroup<- rma.mv(yi, vi, mods = ~`Modality`+`Classifier` -1,random = ~ 1| `Group`/`Outcome_ID`,data=metafor_log_or,slab=`Study`)
+# print(metafor_random_effects_model_mods_Modality_Classification_Algorithm, digits=3)
+DOR_predicted_mods_Modality_classification_algorithm <-predict(metafor_random_effects_model_mods_Modality_Classification_Algorithm, transf=exp, digits=2)
+# print(DOR_predicted_mods_Modality_classification_algorithm)
+
+## Subgroup:Classification Algorithm, Modality And experimental design
+metafor_random_effects_model_mods_all_three_variables<- rma.mv(yi, vi, mods = ~`Modality`+`Classifier`+`Experimental.Task`, random = ~ 1| `Group`/`Outcome_ID`,data=metafor_log_or,slab=`Study`)
+metafor_random_effects_model_mods_all_three_variables_each_group<- rma.mv(yi, vi, mods = ~`Modality`+`Classifier`+`Experimental.Task`-1, random = ~ 1| `Group`/`Outcome_ID`,data=metafor_log_or,slab=`Study`)
+
+# print(metafor_random_effects_model_mods_all_three_variables, digits=3)
+DOR_predicted_mods_all_three_variables <-predict(metafor_random_effects_model_mods_all_three_variables, transf=exp, digits=2)
+# print(DOR_predicted_mods_all_three_variables)
+```
+#------------------------------------------------------------------------------------------
+# - Robust variance Estimation And Sensitivity Analayis (rho from 0 to 1)
+# - <https://cran.r-project.org/web/packages/robumeta/index.html>
+#------------------------------------------------------------------------------------------
+
+```{r}
+setwd(results_folder)
+# ### studynum = Group (Due to same samples were used in multiple papers)
+RVE_StudyGroup <- robu(formula = yi ~ 1, data = metafor_log_or, studynum = `Group_Authors`, var.eff.size = vi,rho = 0.8, small = TRUE)
+# print(RVE_Experimental_Design, digits=3)
+Sensitivity_RVE_RVE_StudyGroup <- sensitivity(RVE_StudyGroup)
+```
+# - - - - - - - - - - - - - - - - -
+# - Bar graphs summarise AI methods and Biomarkers Explored in Studies
+# - - - - - - - - - - - - - - - - -
+## Number of Studies per Machine Learning or Deep Learning Algorithm
+
+# Step 1.1: Plot bar graph (each row as a new outcome) ASD/TD
+```{r, echo=FALSE }
+theme_set(theme_pubr())
+setwd(results_folder)
+bargraph_data_asd_td <-bargraph_data %>% filter(bargraph_data$`Positive_Output_Class` == "ASD" & bargraph_data$`Negative_Output_Class` =="TD")
+View(bargraph_data_asd_td)
+
+ggsave("Supplementary_Figure1A.tiff",dpi=600)
+
+all_classifier_asd_td <- ggplot(bargraph_data_asd_td, aes(reorder(Classifier, desc(performance)), fill = `Interaction Type`)) +
+  geom_bar() +
+  stat_count(aes(label = ..count..), geom = "text", position = position_stack(vjust = 0.5),family="Times New Roman",face = "bold") +
+  theme_pubclean() +
+  labs(fill = "Type of Interaction", x = "Classification Algorithm", y = "Number of Observations") +
+  theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+        legend.text = element_text(size = 10),   # Set legend text font size to 10
+      plot.title = element_text(size = 10,face = "bold")) +
+  scale_fill_manual(labels = c("Human-Agent Interaction","Human-Human Interaction","Human-Robot Interaction"),values = c("#00BA38","#F8766D","#619CFF"))
+
+dev.off()
+
+```
+# Step 1.2: Plot bar graph (each row as a new study) Not ASD/TD
+# completed
+```{r, echo=FALSE }
+setwd(results_folder)
+bargraph_data_other <-bargraph_data %>% filter(bargraph_data$`Positive_Output_Class` != "ASD")
+View(bargraph_data_other)
+ggsave("Supplementary_Figure1B.tiff",dpi=600)
+
+
+all_classifier_other <- ggplot(bargraph_data_other, aes(reorder(Classifier, desc(performance)), fill = `Interaction Type`)) +
+  geom_bar() +
+  stat_count(aes(label = ..count..), geom = "text", position = position_stack(vjust = 0.5),family="Times New Roman",face = "bold") +
+  theme_pubclean() +
+  labs(fill = "Type of Interaction", x = "Classification Algorithm", y = "Number of Observations") +
+  theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+        legend.text = element_text(size = 10),   # Set legend text font size to 10
+      plot.title = element_text(size = 10,face = "bold")) +
+  scale_fill_manual(labels = c("Human-Human Interaction","Human-Robot Interaction"),values = c("#F8766D","#619CFF"))
+
+dev.off()
+```
+
+
+##Number of Studies for each type of Input features (modalities)
+#step 1.3: Modality vs. H-H OR H-R OR H-Agent (ASD/TD)
+
+```{r, echo=FALSE}
+setwd(results_folder)
+ggsave("Supplementary_Figure1C.tiff",dpi=600)
+
+all_modality_ASD_TD<- ggplot(bargraph_data_asd_td,aes(`Modality`, fill=`Interaction Type`))+
+  geom_bar()  +  stat_count(aes(label = ..count..), geom = "text", position = position_stack(vjust = 0.5),family="Times New Roman",face = "bold") +
+
+  theme_pubclean()+ labs(fill = "Type of Interaction", x = "Input Modality",y = "Number of Observations")+   theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+        legend.text = element_text(size = 10),   # Set legend text font size to 10
+      plot.title = element_text(size = 10,face = "bold")) +
+  scale_fill_manual(labels = c("Human-Agent Interaction","Human-Human Interaction","Human-Robot Interaction"),values = c("#00BA38","#F8766D","#619CFF"))
+
+dev.off()
+
+```
+##Number of Studies for each type of Input features (modalities)
+#step 1.4: Modality vs. H-H OR H-R OR H-Agent (Behaviours)
+
+```{r, echo=FALSE}
+setwd(results_folder)
+ggsave("Supplementary_Figure1D.tiff",dpi=600)
+
+all_modality_other<- ggplot(bargraph_data_other,aes(`Modality`, fill=`Interaction Type`))+
+  geom_bar() +  stat_count(aes(label = ..count..), geom = "text", position = position_stack(vjust = 0.5),family="Times New Roman",face = "bold")  +
+  theme_pubclean()+ labs(fill = "Type of Interaction", x = "Input Modality",y = "Number of Observations")+   theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+        legend.text = element_text(size = 10),   # Set legend text font size to 10
+      plot.title = element_text(size = 10,face = "bold")) +
+  scale_fill_manual(labels = c("Human-Human Interaction","Human-Robot Interaction"),values = c("#F8766D","#619CFF"))
+
+dev.off()
+
+```
